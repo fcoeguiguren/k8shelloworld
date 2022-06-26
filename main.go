@@ -11,14 +11,19 @@ import (
 	"github.com/common-nighthawk/go-figure"
 	core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	// Uncomment to load all auth plugins
 	// _ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 )
+
+var podDeleted = make(chan int)
 
 func main() {
 	ctx := context.Background()
@@ -46,6 +51,26 @@ func main() {
 		panic(err.Error())
 	}
 
+	stopper := make(chan struct{})
+	defer close(stopper)
+
+	factory := informers.NewSharedInformerFactoryWithOptions(clientset, 5, informers.WithNamespace(namespace))
+	informer := factory.Core().V1().Pods().Informer()
+
+	defer runtime.HandleCrash()
+	go factory.Start(stopper)
+
+	if !cache.WaitForCacheSync(stopper, informer.HasSynced) {
+		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		return
+	}
+
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    onAdd, // register add eventhandler
+		UpdateFunc: func(interface{}, interface{}) {},
+		DeleteFunc: onDelete,
+	})
+
 	listNamespaces(ctx, clientset)
 	createNamespace(ctx, clientset, namespace)
 	time.Sleep(3 * time.Second)
@@ -56,14 +81,20 @@ func main() {
 	time.Sleep(3 * time.Second)
 	listPodsWithLabels(ctx, clientset, filterLabel)
 	deletePod(ctx, clientset, podName, namespace)
-	time.Sleep(3 * time.Second)
+	<-podDeleted
 	deleteNamespace(ctx, clientset, namespace)
-	time.Sleep(3 * time.Second)
-	listNamespaces(ctx, clientset)
-
+}
+func onAdd(obj interface{}) {
+	pod := obj.(*core.Pod)
+	fmt.Printf("=== Informer --> Pod [%s] created ===\n", pod.Name)
+}
+func onDelete(obj interface{}) {
+	pod := obj.(*core.Pod)
+	fmt.Printf("=== Informer --> Pod [%s] deleted ===\n", pod.Name)
+	podDeleted <- 1
 }
 func listPodsWithLabels(ctx context.Context, clientset *kubernetes.Clientset, filterLabel string) {
-	fmt.Printf("=== Listing pods in all namspeaces with label %s  ===\n", filterLabel)
+	fmt.Printf("=== Listing pods in all namspeaces with label [%s]  ===\n", filterLabel)
 	pods, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
 		LabelSelector: filterLabel,
 	})
@@ -71,12 +102,12 @@ func listPodsWithLabels(ctx context.Context, clientset *kubernetes.Clientset, fi
 		panic(err.Error())
 	}
 	for _, p := range pods.Items {
-		fmt.Printf("Pod %s in namespace %s\n", p.Name, p.Namespace)
+		fmt.Printf("Pod [%s] in namespace [%s]\n", p.Name, p.Namespace)
 	}
 
 }
 func deletePod(ctx context.Context, clientset *kubernetes.Clientset, podName, namespace string) {
-	fmt.Printf("=== Deleting %s pod in namespace %s ===\n", podName, namespace)
+	fmt.Printf("=== Deleting [%s] pod in namespace [%s] ===\n", podName, namespace)
 	err := clientset.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{})
 	if err != nil {
 		panic(err.Error())
@@ -84,7 +115,7 @@ func deletePod(ctx context.Context, clientset *kubernetes.Clientset, podName, na
 	fmt.Printf("=== Pod deleted ===\n")
 }
 func createPod(ctx context.Context, clientset *kubernetes.Clientset, podName, namespace string, labels map[string]string) {
-	fmt.Printf("=== Creating %s pod in namespace %s ===\n", podName, namespace)
+	fmt.Printf("=== Creating [%s] pod in namespace [%s] ===\n", podName, namespace)
 	p := &core.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -104,20 +135,20 @@ func createPod(ctx context.Context, clientset *kubernetes.Clientset, podName, na
 	if err != nil {
 		panic(err.Error())
 	}
-	fmt.Printf("=== Pod %s created on %s  ===\n", pod.Name, &pod.ObjectMeta.CreationTimestamp)
+	fmt.Printf("=== Pod [%s] created on [%s]  ===\n", pod.Name, &pod.ObjectMeta.CreationTimestamp)
 }
 func listNamespaces(ctx context.Context, clientset *kubernetes.Clientset) {
 	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		panic(err.Error())
 	}
-	fmt.Printf("=== Found %d namespaces === \n", len(namespaces.Items))
+	fmt.Printf("=== Found [%d] namespaces === \n", len(namespaces.Items))
 	for _, s := range namespaces.Items {
 		fmt.Println(s.Name)
 	}
 }
 func createNamespace(ctx context.Context, clientset *kubernetes.Clientset, namespace string) {
-	fmt.Printf("=== Creating new namespace %s in the cluster ===\n", namespace)
+	fmt.Printf("=== Creating new namespace [%s] in the cluster ===\n", namespace)
 	s := &core.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: namespace},
 	}
@@ -125,14 +156,14 @@ func createNamespace(ctx context.Context, clientset *kubernetes.Clientset, names
 	if err != nil {
 		panic(err.Error())
 	}
-	fmt.Printf("== Namespace %s created on %s ===\n", ns.Name, ns.ObjectMeta.CreationTimestamp)
+	fmt.Printf("=== Namespace [%s] created on [%s] ===\n", ns.Name, ns.ObjectMeta.CreationTimestamp)
 }
 func deleteNamespace(ctx context.Context, clientset *kubernetes.Clientset, namespace string) {
-	fmt.Printf("=== Deleting namespace %s ===\n", namespace)
+	fmt.Printf("=== Deleting namespace [%s] ===\n", namespace)
 	err := clientset.CoreV1().Namespaces().Delete(ctx, namespace, metav1.DeleteOptions{})
 	if err != nil {
 		panic(err.Error())
 	}
 
-	fmt.Printf("=== Namespace %s deleted ===\n", namespace)
+	fmt.Printf("=== Namespace [%s] deleted ===\n", namespace)
 }
